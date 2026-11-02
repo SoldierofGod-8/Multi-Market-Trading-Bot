@@ -1,0 +1,57 @@
+# ============================================================
+#  Multi-Market Trading Bot - configuration
+#  mode: paper = simulated money on REAL prices (default, safe)
+#        live  = real orders (only after you have paper traded)
+# ============================================================
+mode: paper
+starting_equity: 10000          # paper-mode starting balance (USD-equivalent)
+poll_seconds: 60                # how often the bot checks markets
+state_file: data/state.json
+journal_file: logs/trades.csv   # every closed trade is written here
+log_file: logs/bot.log
+stop_file: STOP_BOT             # create this file (or press Ctrl+C) to stop the bot
+
+# Paper-mode realism
+paper_fee_rate: 0.001           # 0.1% per side
+paper_slippage_bps: 2           # 0.02% slippage per fill
+
+# Where each market gets prices from: ccxt | mt5 | synthetic (synthetic = fake, testing only)
+feeds:
+  crypto: ccxt
+  forex: mt5
+  metals: mt5
+ccxt_exchange: binance          # any ccxt exchange: bybit, okx, kraken, kucoin ...
+ccxt_quote: USDT
+
+risk:
+  risk_per_trade: 0.01          # risk 1% of equity per trade
+  max_open_positions: 4
+  max_position_fraction: 0.25   # never more than 25% of equity in one position
+  daily_loss_limit: 0.03        # down 3% today -> flatten and stop for the day
+  max_drawdown: 0.15            # down 15% from peak -> flatten and stop until you reset
+
+strategy:
+  timeframe: 1h
+  bars: 300
+  ema_fast: 20
+  ema_slow: 50
+  ema_trend: 200
+  rsi_period: 14
+  rsi_long_min: 50
+  rsi_long_max: 70
+  rsi_short_min: 30
+  rsi_short_max: 50
+  atr_period: 14
+  stop_atr: 2.0                 # stop-loss = 2 x ATR
+  tp_atr: 3.0                   # take-profit = 3 x ATR (1.5 reward:risk)
+
+# Symbols to monitor. Crypto is long-only (spot). Forex/metals can go short.
+instruments:
+  - {symbol: "BTC/USDT", market: crypto, allow_short: false}
+  - {symbol: "ETH/USDT", market: crypto, allow_short: false}
+  - {symbol: "SOL/USDT", market: crypto, allow_short: false}
+  - {symbol: "EURUSD", market: forex, allow_short: true}
+  - {symbol: "GBPUSD", market: forex, allow_short: true}
+  - {symbol: "USDJPY", market: forex, allow_short: true}
+  - {symbol: "XAUUSD", market: metals, allow_short: true}
+  - {symbol: "XAGUSD", market: metals, allow_short: true}
