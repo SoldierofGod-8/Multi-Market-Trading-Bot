@@ -25,24 +25,52 @@ def cmd_run(args, cfg: Config):
     Engine(cfg, feeds, brokers).run(once=args.once)
 
 
+def load_csv(path: str) -> "pd.DataFrame":
+    """Load OHLC(V) candles from a CSV with a datetime/date column (UTC assumed)."""
+    import pandas as pd
+    raw = pd.read_csv(path)
+    raw.columns = [c.strip().lower() for c in raw.columns]
+    tcol = "datetime" if "datetime" in raw.columns else "date"
+    df = raw.set_index(pd.to_datetime(raw[tcol], utc=True))[["open", "high", "low", "close"]]
+    df = df.astype(float).sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    return df
+
+
 def cmd_backtest(args, cfg: Config):
     from .backtest import run_backtest
     from .engine import make_exchange
     from .feeds import CcxtFeed, Mt5Feed
-    kind = cfg.feed_for(args.market)
-    if kind == "ccxt":
-        feed = CcxtFeed(make_exchange(cfg))
-    elif kind == "mt5":
-        feed = Mt5Feed()
+    tf = args.timeframe or cfg.strategy.timeframe
+    if args.csv:
+        df = load_csv(args.csv)
     else:
-        sys.exit("backtest needs real data: set feeds.%s to ccxt or mt5" % args.market)
-    tf = cfg.strategy.timeframe
-    df = feed.candles(args.symbol, tf, args.bars)
+        kind = cfg.feed_for(args.market)
+        if kind == "ccxt":
+            feed = CcxtFeed(make_exchange(cfg))
+        elif kind == "mt5":
+            feed = Mt5Feed()
+        else:
+            sys.exit("backtest needs real data: set feeds.%s to ccxt or mt5" % args.market)
+        df = feed.candles(args.symbol, tf, args.bars)
+    if args.start:
+        df = df[df.index >= args.start]
+    if args.end:
+        df = df[df.index <= args.end]
+    cfg.strategy.timeframe = tf
     allow_short = args.market != "crypto"
-    rep = run_backtest(df, cfg.strategy, cfg, allow_short=allow_short)
+    rep = run_backtest(df, cfg.strategy, cfg, allow_short=allow_short, market=args.market)
     print(f"Backtest {args.symbol} {tf} bars={len(df)} ({df.index[0]} -> {df.index[-1]})")
+    print(f"Costs: fee {cfg.paper_fee_rate*100:.3f}%/side, slippage {cfg.paper_slippage_bps} bps, "
+          f"risk {cfg.risk.risk_per_trade*100:.1f}%/trade, start equity {cfg.starting_equity:,.0f}")
     for k, v in rep.summary().items():
-        print(f"  {k:>16}: {v:.4f}" if isinstance(v, float) else f"  {k:>16}: {v}")
+        if isinstance(v, float):
+            print(f"  {k:>22}: {v:,.4f}")
+        else:
+            print(f"  {k:>22}: {v}")
+    if args.trades_out:
+        rep.trades_frame().to_csv(args.trades_out, index=False)
+        print(f"Trades written to {args.trades_out}")
     print("NOTE: past results do not guarantee future results.")
 
 
@@ -77,6 +105,11 @@ def main(argv=None):
     b.add_argument("--market", required=True, choices=["crypto", "forex", "metals"])
     b.add_argument("--symbol", required=True)
     b.add_argument("--bars", type=int, default=2000)
+    b.add_argument("--csv", help="backtest a local CSV instead of downloading (columns: datetime/date, open, high, low, close)")
+    b.add_argument("--timeframe", help="override strategy timeframe, e.g. 1h, 4h, 1d")
+    b.add_argument("--start", help="ISO date/time to start from, e.g. 2020-01-01")
+    b.add_argument("--end", help="ISO date/time to end at")
+    b.add_argument("--trades-out", help="write every trade to this CSV")
     sub.add_parser("status")
     sub.add_parser("clear-halt")
     args = p.parse_args(argv)

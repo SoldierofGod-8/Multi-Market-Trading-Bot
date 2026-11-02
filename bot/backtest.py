@@ -1,4 +1,12 @@
-"""Historical replay of the same strategy and risk rules (paper fills, bar-level stops)."""
+"""Historical replay of the same strategy and sizing rules.
+
+Assumptions (see README "Backtest assumptions"):
+- Decisions use the close of a closed bar; entries fill at that close plus slippage.
+- Stops/targets are checked against each later bar's high/low; if both are touched in
+  one bar the stop is assumed to fill first (conservative).
+- Fees and slippage as in paper mode. No spread model beyond slippage.
+- The daily-loss and max-drawdown breakers are NOT simulated here.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,7 +16,8 @@ import pandas as pd
 
 from .config import Config, StrategyConfig
 from .risk import position_size
-from .strategy import evaluate
+from .stats import compute_stats, periods_per_year
+from .strategy import signal_frame
 
 
 @dataclass
@@ -18,85 +27,94 @@ class Trade:
     side: int
     entry: float
     exit: float
+    qty: float
     pnl: float
     reason: str
+    bars: int
 
 
 @dataclass
 class Report:
     trades: list = field(default_factory=list)
     equity_curve: list = field(default_factory=list)
+    in_market: list = field(default_factory=list)
     start_equity: float = 0.0
+    index: object = None
+    buy_hold_return: float = 0.0
+    ppy: float = 252.0
 
     def summary(self) -> dict:
-        pnls = np.array([t.pnl for t in self.trades]) if self.trades else np.array([])
-        eq = np.array(self.equity_curve) if self.equity_curve else np.array([self.start_equity])
-        peak = np.maximum.accumulate(eq)
-        mdd = float(((peak - eq) / peak).max()) if len(eq) else 0.0
-        wins, losses = pnls[pnls > 0], pnls[pnls < 0]
-        gross_loss = -losses.sum()
-        end = float(eq[-1])
-        return {
-            "trades": len(pnls),
-            "win_rate": float(len(wins) / len(pnls)) if len(pnls) else 0.0,
-            "net_profit": end - self.start_equity,
-            "return_pct": (end / self.start_equity - 1) * 100 if self.start_equity else 0.0,
-            "profit_factor": _profit_factor(wins.sum(), gross_loss),
-            "max_drawdown_pct": mdd * 100,
-            "avg_trade": float(pnls.mean()) if len(pnls) else 0.0,
-        }
+        pnls = np.array([t.pnl for t in self.trades], dtype=float)
+        bars = np.array([t.bars for t in self.trades], dtype=float)
+        return compute_stats(np.array(self.equity_curve), pnls, bars,
+                             np.array(self.in_market, dtype=float), self.start_equity,
+                             self.buy_hold_return, self.ppy)
 
-
-def _profit_factor(gross_win: float, gross_loss: float) -> float:
-    if gross_loss > 0:
-        return float(gross_win / gross_loss)
-    return float("inf") if gross_win > 0 else 0.0
+    def trades_frame(self) -> pd.DataFrame:
+        return pd.DataFrame([t.__dict__ for t in self.trades])
 
 
 def run_backtest(df: pd.DataFrame, s: StrategyConfig, cfg: Config,
-                 allow_short: bool = True) -> Report:
+                 allow_short: bool = True, market: str = "forex") -> Report:
     fee, slip = cfg.paper_fee_rate, cfg.paper_slippage_bps / 10000
-    equity = cfg.starting_equity
-    rep = Report(start_equity=equity)
-    pos = None  # dict with side, qty, entry, sl, tp, time, fee
+    sig = signal_frame(df, s)
+    side_arr, cross_arr, atr_arr = sig["side"].values, sig["cross"].values, sig["atr"].values
+    close, high, low = df["close"].values, df["high"].values, df["low"].values
+    idx = df.index
+    cash = cfg.starting_equity
+    rep = Report(start_equity=cash, index=idx,
+                 buy_hold_return=float(close[-1] / close[0] - 1) if len(close) else 0.0,
+                 ppy=periods_per_year(s.timeframe, market))
+    pos = None
     warm = s.ema_trend + 2
-    for i in range(warm, len(df)):
-        bar = df.iloc[i]
-        t = df.index[i]
+    for i in range(len(df)):
+        if i < warm:
+            rep.equity_curve.append(cash)
+            rep.in_market.append(0)
+            continue
+        exited = False
         if pos is not None:
             exit_px, reason = None, None
             if pos["side"] == 1:
-                if bar.low <= pos["sl"]:
-                    exit_px, reason = pos["sl"], "stop"      # conservative: stop wins ties
-                elif bar.high >= pos["tp"]:
+                if low[i] <= pos["sl"]:
+                    exit_px, reason = pos["sl"], "stop"
+                elif high[i] >= pos["tp"]:
                     exit_px, reason = pos["tp"], "target"
             else:
-                if bar.high >= pos["sl"]:
+                if high[i] >= pos["sl"]:
                     exit_px, reason = pos["sl"], "stop"
-                elif bar.low <= pos["tp"]:
+                elif low[i] <= pos["tp"]:
                     exit_px, reason = pos["tp"], "target"
-            sig = evaluate(df.iloc[: i + 1], s)
-            if exit_px is None and sig.cross == -pos["side"]:
-                exit_px, reason = bar.close, "signal_exit"
+            if exit_px is None and cross_arr[i] == -pos["side"]:
+                exit_px, reason = close[i], "signal_exit"
             if exit_px is not None:
                 px = exit_px * (1 - pos["side"] * slip)
                 exit_fee = px * pos["qty"] * fee
                 pnl = (px - pos["entry"]) * pos["side"] * pos["qty"] - exit_fee - pos["fee"]
-                equity += pnl
-                rep.trades.append(Trade(pos["time"], t, pos["side"], pos["entry"], px, pnl, reason))
+                cash += pnl
+                rep.trades.append(Trade(pos["time"], idx[i], pos["side"], pos["entry"], px,
+                                        pos["qty"], pnl, reason, i - pos["i"]))
                 pos = None
-        else:
-            sig = evaluate(df.iloc[: i + 1], s)
-            if sig.side != 0 and (sig.side == 1 or allow_short):
-                side, price = sig.side, bar.close
-                stop_dist = s.stop_atr * sig.atr
-                qty = position_size(equity, price, stop_dist, cfg.risk.risk_per_trade,
+                exited = True  # like the live engine: no re-entry on the exit bar
+        if pos is None and not exited:
+            sd = side_arr[i]
+            if sd != 0 and (sd == 1 or allow_short):
+                price = close[i]
+                stop_dist = s.stop_atr * atr_arr[i]
+                qty = position_size(cash, price, stop_dist, cfg.risk.risk_per_trade,
                                     cfg.risk.max_position_fraction)
                 if qty > 0:
-                    entry = price * (1 + side * slip)
-                    fee_in = entry * qty * fee
-                    pos = {"side": side, "qty": qty, "entry": entry, "time": t,
-                           "sl": price - side * stop_dist,
-                           "tp": price + side * s.tp_atr * sig.atr, "fee": fee_in}
-        rep.equity_curve.append(equity)
+                    entry = price * (1 + sd * slip)
+                    pos = {"side": sd, "qty": qty, "entry": entry, "time": idx[i], "i": i,
+                           "sl": price - sd * stop_dist,
+                           "tp": price + sd * s.tp_atr * atr_arr[i],
+                           "fee": entry * qty * fee}
+        # mark-to-market equity at this bar's close
+        if pos is not None:
+            unreal = (close[i] - pos["entry"]) * pos["side"] * pos["qty"]
+            rep.equity_curve.append(cash + unreal)
+            rep.in_market.append(1)
+        else:
+            rep.equity_curve.append(cash)
+            rep.in_market.append(0)
     return rep

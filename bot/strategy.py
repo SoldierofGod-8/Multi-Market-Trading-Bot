@@ -54,3 +54,27 @@ def evaluate(df: pd.DataFrame, p: StrategyConfig) -> Signal:
     elif cross != 0:
         reason = "cross_filtered"
     return Signal(side, cross, float(a_now), reason)
+
+
+def signal_frame(df: pd.DataFrame, p: StrategyConfig) -> pd.DataFrame:
+    """Vectorised version of evaluate() for every bar at once (used by the backtester).
+
+    Every indicator is causal (uses only current and past bars), so row i here equals
+    evaluate(df.iloc[:i+1], p). tests/test_core.py checks that parity.
+    """
+    c = df["close"]
+    f, s, t = ema(c, p.ema_fast), ema(c, p.ema_slow), ema(c, p.ema_trend)
+    r, a = rsi(c, p.rsi_period), atr(df, p.atr_period)
+    fp, sp = f.shift(1), s.shift(1)
+    finite = np.isfinite(f) & np.isfinite(s) & np.isfinite(t) & np.isfinite(r) \
+        & np.isfinite(a) & np.isfinite(fp) & np.isfinite(sp) & np.isfinite(c)
+    warm = pd.Series(np.arange(len(df)) + 1 >= p.ema_trend + 2, index=df.index)
+    valid = finite & warm
+    cross_up = (fp <= sp) & (f > s) & valid
+    cross_dn = (fp >= sp) & (f < s) & valid
+    cross = np.where(cross_up, 1, np.where(cross_dn, -1, 0))
+    long_ok = cross_up & (c > t) & (r >= p.rsi_long_min) & (r <= p.rsi_long_max) & (a > 0)
+    short_ok = cross_dn & (c < t) & (r >= p.rsi_short_min) & (r <= p.rsi_short_max) & (a > 0)
+    side = np.where(long_ok, 1, np.where(short_ok, -1, 0))
+    return pd.DataFrame({"side": side, "cross": cross,
+                         "atr": np.where(valid, a, 0.0)}, index=df.index)

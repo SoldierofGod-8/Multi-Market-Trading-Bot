@@ -248,4 +248,4 @@ def test_backtest_runs_and_reports(tmp_path):
     summ = rep.summary()
     assert summ["trades"] == len(rep.trades)
     assert 0 <= summ["max_drawdown_pct"] <= 100
-    assert len(rep.equity_curve) == len(df) - (s.ema_trend + 2)
+    assert len(rep.equity_curve) == len(df)  # mark-to-market for every bar

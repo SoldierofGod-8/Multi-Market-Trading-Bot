@@ -111,3 +111,26 @@ config.yaml      settings
 - The default parameters are a reasonable starting point, not an optimised
   strategy. Optimise only on out-of-sample data, and expect results to degrade in live
   trading.
+
+## Backtesting
+
+Backtest a local CSV (columns `datetime` or `date`, `open`, `high`, `low`, `close`):
+
+```
+python -m bot --config config.yaml backtest --market crypto --symbol BTCUSD --timeframe 1d --csv path/to/btc_daily.csv --trades-out trades.csv
+```
+
+Output includes return, CAGR, Sharpe, Sortino, Calmar, max drawdown, win rate, profit factor,
+expectancy, trade t-statistic and buy-and-hold comparison. Results on the three datasets are in
+`docs/backtest_results.md`.
+
+### Backtest assumptions
+- Signals use closed bars only, and the vectorised signal path is tested to match the live code.
+- Entries fill at the bar close plus slippage. Stops and targets are checked against each later bar's
+  high and low. If both are touched in one bar, the stop is assumed first (conservative).
+- No re-entry on the bar a position is closed (same as the live engine).
+- Equity is marked to market every bar, so Sharpe and drawdown include open-trade swings.
+- Not simulated: the daily-loss and max-drawdown breakers, spreads beyond slippage, swap/rollover
+  fees, and currency conversion.
+- Sharpe uses 0% risk-free rate. Periods per year are 365 for crypto and 252 trading days for forex
+  and metals.
